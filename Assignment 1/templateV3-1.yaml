@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Assignment 1 CloudFormation template
+
+Parameters:
+    # Database parameters are defined and set here
+    DBUsername:
+        Type: String
+        Description: Username for the RDS MySQL instance
+        Default: admin
+    DBPassword:
+        Type: String
+        Description: Password for the RDS MySQL instance
+        Default: Re:Start!9
+
+Resources:
+    # A key pair is created for SSH, i've given the key the name cafeSSHKeyPairUpdated, used for connecting securely via ssh.
+    KeyPair:
+        Type: AWS::EC2::KeyPair
+        Properties:
+            KeyName: cafeSSHKeyPairUpdated
+
+    # A VPC is created with CIDRBlock 10.0.0.0/16
+    # This VPC is the network component is where we can isolate our resources
+    VPC:
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: 10.0.0.0/16
+            EnableDnsSupport: true
+            EnableDnsHostnames: true
+
+    # A public subnet is created within the referenced VPC
+    # This subnet is public because it's associated with a route table that has a route to an Internet Gateway
+    PublicSubnet:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            CidrBlock: 10.0.0.0/24
+            MapPublicIpOnLaunch: true
+
+    # A second subnet is created within the referenced VPC
+    # This subnet is private and will be used for resources the RDS instance since we don't want it publicly accessible from the internet
+    PrivateSubnet:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            CidrBlock: 10.0.1.0/24
+            AvailabilityZone: "us-east-1c"
+
+    # A third subnet is created within the referenced VPC
+    PrivateSubnet2:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            CidrBlock: 10.0.2.0/24
+            AvailabilityZone: "us-east-1b"
+
+    # Internet gateway is defined
+    # This Internet Gateway is used to provide internet access to the resources in our VPC
+    InternetGateway:
+        Type: AWS::EC2::InternetGateway
+
+    # Internet gateway is attached to the VPC
+    AttachGateway:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            VpcId: !Ref VPC
+            InternetGatewayId: !Ref InternetGateway
+
+    # This is the main route table that will be associated with our public subnet
+    RouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref VPC
+
+    # This route ensures that any outbound traffic (0.0.0.0/0) goes through the Internet Gateway
+    PublicRoute:
+        Type: AWS::EC2::Route
+        DependsOn: AttachGateway
+        Properties:
+            RouteTableId: !Ref RouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            GatewayId: !Ref InternetGateway
+
+    # This associates the public subnet with the main route table
+    PublicSubnetRouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet
+            RouteTableId: !Ref RouteTable
+
+    # This Elastic IP is used by the NAT Gateway
+    NATGatewayEIP:
+        Type: AWS::EC2::EIP
+        Properties:
+            Domain: vpc
+
+    # This NAT Gateway is used to provide internet access to the instances in the private subnets
+    NATGateway:
+        Type: AWS::EC2::NatGateway
+        Properties:
+            AllocationId: !GetAtt NATGatewayEIP.AllocationId
+            SubnetId: !Ref PublicSubnet
+
+    # This is the route table for the private subnets
+    PrivateRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref VPC
+
+    # This route ensures that any outbound traffic from the private subnets goes through the NAT Gateway
+    NATRoute:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref PrivateRouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            NatGatewayId: !Ref NATGateway
+
+    # This associates the first private subnet with the private route table
+    PrivateSubnetRouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PrivateSubnet
+            RouteTableId: !Ref PrivateRouteTable
+
+    # This associates the second private subnet with the private route table
+    PrivateSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PrivateSubnet2
+            RouteTableId: !Ref PrivateRouteTable
+
+    # This security group allows internal traffic within the VPC
+    InternalTraffic:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            VpcId: !Ref VPC
+            GroupDescription: internal access
+
+    # This rule allows all traffic within the security group
+    InternalTrafficRule:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+            GroupId: !Ref InternalTraffic
+            IpProtocol: All
+            SourceSecurityGroupId: !GetAtt
+                - InternalTraffic
+                - GroupId
+
+    # This security group is for the EC2 instances and allows SSH and HTTP access from any IP address
+    EC2SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Enable SSH and HTTP access
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+            VpcId: !Ref VPC
+
+    # This is the RDS instance configuration. It's a MySQL database with the specified username and password. It's located in the private subnets.
+    RDSInstance:
+        Type: AWS::RDS::DBInstance
+        Properties:
+            DBName: cafe_db
+            Engine: mysql
+            DBInstanceClass: db.t3.micro
+            EngineVersion: "5.7.44"
+            MasterUsername: !Ref DBUsername
+            MasterUserPassword: !Ref DBPassword
+            AllocatedStorage: 20
+            DBSubnetGroupName: !Ref DBSubnetGroup
+            MultiAZ: false
+            VPCSecurityGroups:
+                - Ref: InternalTraffic
+
+    # This is the subnet group for the RDS instance. It includes the private subnets
+    DBSubnetGroup:
+        Type: AWS::RDS::DBSubnetGroup
+        Properties:
+            DBSubnetGroupDescription: Subnets for RDS instance
+            SubnetIds:
+                - Ref: PrivateSubnet
+                - Ref: PrivateSubnet2
+
+    # This is the EC2 instance configuration. It's a t2.micro instance located in the public subnet. It has a startup script that installs and starts a web server.
+    EC2Instance:
+        Type: AWS::EC2::Instance
+        Properties:
+            InstanceType: t2.micro
+            ImageId: ami-0c101f26f147fa7fd
+            KeyName: !Ref KeyPair
+            SecurityGroupIds:
+                - Ref: EC2SecurityGroup
+                - Ref: InternalTraffic
+            SubnetId: !Ref PublicSubnet
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    dnf install -y httpd php php-mysqli mariadb105
+                    systemctl enable httpd
+                    systemctl start httpd
